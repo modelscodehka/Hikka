@@ -17,7 +17,6 @@ class MediaData:
     content: Union[str, List[str]]
     content_type: str
 
-
 class TikTokAPI:
     def __init__(self, base_url: Optional[str] = None):
         self.headers = {
@@ -39,17 +38,22 @@ class TikTokAPI:
             return self.cache[url]
         
         response = await self._request("api", {"url": url, "hd": 1})
+        if not response:
+            raise Exception("API не вернуло данных.")
+        
         self.cache[url] = response
         return response
 
     async def _request(self, endpoint: str, params: dict) -> dict:
         async with self.session.get(urljoin(self.base_url, endpoint), params=params, headers=self.headers) as resp:
-            resp.raise_for_status()
+            if resp.status != 200:
+                raise Exception(f"Ошибка запроса: {resp.status}")
+            
             data = await resp.json()
             return data.get("data", {})
 
     @staticmethod
-    def extract_url(text: str) -> Optional[str]:
+    def extract_url(text: Optional[str]) -> Optional[str]:
         if not text:
             return None
         urls = re.findall(r"http[s]?://[^\s]+", text)
@@ -64,19 +68,25 @@ class TikTokAPI:
 
     async def download_video(self, url: str, filename: Optional[str] = None, hd: bool = False) -> MediaData:
         data = await self._fetch_data(url)
-        video_url = data["hdplay"] if hd else data["play"]
-        filename = filename or f"{data['id']}.mp4"
+        if not data:
+            raise Exception("Не удалось получить данные о видео.")
+
+        video_url = data.get("hdplay") if hd else data.get("play")
+        if not video_url:
+            raise Exception("Видео недоступно или удалено.")
+
+        filename = filename or f"{data.get('id', 'video')}.mp4"
+        filepath = os.path.join(os.getcwd(), filename)
 
         async with self.session.get(video_url) as resp:
             total_size = int(resp.headers.get('content-length', 0))
-            with open(filename, 'wb') as file:
+            with open(filepath, 'wb') as file:
                 with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as pbar:
                     async for chunk in resp.content.iter_any():
                         file.write(chunk)
                         pbar.update(len(chunk))
 
-        return MediaData(folder=os.path.dirname(filename), content=filename, content_type="video")
-
+        return MediaData(folder=os.getcwd(), content=filepath, content_type="video")
 
 @loader.tds
 class TikTokDL(loader.Module):
@@ -89,18 +99,24 @@ class TikTokDL(loader.Module):
         args = utils.get_args(message)
         reply = await message.get_reply_message()
 
-        url = self.extract_url(" ".join(args)) or (self.extract_url(reply.text) if reply else None)
+        logging.info(f"Args: {args}")
+        logging.info(f"Reply message: {reply.text if reply else 'Нет ответа'}")
+
+        url = TikTokAPI.extract_url(" ".join(args))
+
+        if not url and reply and reply.text:
+            url = TikTokAPI.extract_url(reply.text)
 
         if not url:
-            return await utils.answer(message, "Укажите ссылку на видео или ответьте на сообщение с ссылкой.")
+            return await utils.answer(message, "❌ Укажите ссылку на видео или ответьте на сообщение с ссылкой.")
 
-        await utils.answer(message, "⏳ Загрузка...")
+        await utils.answer(message, "⏳ Загрузка видео...")
 
         api = TikTokAPI()
 
         try:
             video = await api.download_video(url)
-            await message.client.send_file(message.to_id, video.content)
+            await message.client.send_file(message.to_id, video.content)  # Убрана caption
             await message.delete()
         except Exception as e:
             await utils.answer(message, f"❌ Ошибка: {e}")
