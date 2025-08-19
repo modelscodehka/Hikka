@@ -1,4 +1,4 @@
-#meta developer: @modules_hikkaa
+#meta developer: @celestial_modules
 from .. import loader, utils
 import logging
 
